@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>DSL Analog Web Simulator v2</title>
+    <style>
+        body {
+            background-color: #0d1117;
+            color: #58a6ff;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 { color: #58a6ff; font-size: 1.5rem; text-shadow: 0 0 10px rgba(88,166,255,0.5); margin-bottom: 5px; }
+        .container { display: flex; gap: 20px; margin-top: 20px; }
+        .control-panel {
+            background: #161b22;
+            border: 1px solid #30363d;
+            padding: 20px;
+            border-radius: 8px;
+            width: 320px;
+        }
+        .visualizer {
+            background: #000;
+            border: 2px solid #58a6ff;
+            box-shadow: 0 0 20px rgba(88,166,255,0.2);
+            border-radius: 8px;
+        }
+        .slider-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.85rem; margin-bottom: 5px; color: #8b949e; }
+        input[type=range] { width: 100%; }
+        .status { font-size: 0.8rem; color: #7ee787; margin-top: 10px; }
+        
+        /* 新增按鈕樣式 */
+        .btn {
+            background-color: #21262d;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            width: 100%;
+            margin-top: 10px;
+            transition: 0.2s;
+        }
+        .btn:hover { background-color: #30363d; color: #58a6ff; border-color: #8b949e; }
+        .btn-active { background-color: #238636; color: #fff; border-color: #2ea44f; }
+        .btn-active:hover { background-color: #2ea44f; color: #fff; }
+        
+        /* 數據落檔顯示區 */
+        .data-dump {
+            margin-top: 15px;
+            background: #040406;
+            border: 1px solid #30363d;
+            padding: 10px;
+            border-radius: 4px;
+            height: 60px;
+            font-size: 0.75rem;
+            color: #7ee787;
+            overflow-y: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>BI-OPTIC / ANALOG PATTERN WEB SIMULATOR</h1>
+    <div style="color: #8b949e; font-size: 0.9rem;">v2.0 (Integrated Web Audio API & Pattern Exporter)</div>
+
+    <div class="container">
+        <div class="control-panel">
+            <h3>DSL 類比參數輸入</h3>
+            <hr style="border-color: #30363d;">
+            
+            <div class="slider-group">
+                <label>Oxygen Usage (氧氣消耗頻率): <span id="val-oxygen">1</span> Hz</label>
+                <input type="range" id="param-oxygen" min="0.1" max="5" step="0.1" value="1">
+            </div>
+            
+            <div class="slider-group">
+                <label>Glucose Power Gain (血糖功率增益): <span id="val-glucose">50</span></label>
+                <input type="range" id="param-glucose" min="10" max="150" step="1" value="50">
+            </div>
+            
+            <div class="slider-group">
+                <label>Anchored Frequency (藍牙錨定載波): <span id="val-freq">5</span> kHz</label>
+                <input type="range" id="param-freq" min="1" max="20" step="0.5" value="5">
+            </div>
+
+            <div class="slider-group">
+                <label>Lens Activity (四葉鏡片折射率): <span id="val-lens">4</span></label>
+                <input type="range" id="param-lens" min="2" max="8" step="1" value="4">
+            </div>
+
+            <hr style="border-color: #30363d;">
+            
+            <button id="btn-audio" class="btn">🔊 ACTIVATE VOICE CLINCH</button>
+            <button id="btn-export" class="btn">💾 EXPORT COMPRESSED JSON</button>
+
+            <div class="status">● Feedback Loop: <span style="color:#7ee787;">CLINCHED</span></div>
+            
+            <div class="data-dump" id="data-preview">JSON Stream: Awaiting Export...</div>
+        </div>
+
+        <canvas id="simulatorCanvas" class="visualizer" width="600" height="450"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simulatorCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const pOxygen = document.getElementById('param-oxygen');
+        const pGlucose = document.getElementById('param-glucose');
+        const pFreq = document.getElementById('param-freq');
+        const pLens = document.getElementById('param-lens');
+        const btnAudio = document.getElementById('btn-audio');
+        const btnExport = document.getElementById('btn-export');
+        const dataPreview = document.getElementById('data-preview');
+
+        let time = 0;
+        let lastPatternData = []; // 儲存最後一幀的壓縮波形數據
+
+        // --- Web Audio API 相關設定 ---
+        let audioCtx = null;
+        let oscillator = null;
+        let gainNode = null;
+        let isAudioPlaying = false;
+
+        function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            oscillator = audioCtx.createOscillator();
+            gainNode = audioCtx.createGain();
+
+            // 設定波形為鋸齒波 (Sawtooth)，更有類比物理硬體的粗糙顆粒感
+            oscillator.type = 'sawtooth'; 
+            oscillator.frequency.setValueAtTime(220, audioCtx.currentTime);
+            
+            // 初始音量設低，避免刺耳
+            gainNode.gain.setValueAtTime(0.02, audioCtx.currentTime); 
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+        }
+
+        btnAudio.addEventListener('click', () => {
+            if (!audioCtx) {
+                initAudio();
+                isAudioPlaying = true;
+                btnAudio.innerText = "🔇 MUTE VOICE CLINCH";
+                btnAudio.classList.add('btn-active');
+            } else {
+                if (isAudioPlaying) {
+                    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+                    isAudioPlaying = false;
+                    btnAudio.innerText = "🔊 UNMUTE VOICE CLINCH";
+                    btnAudio.classList.remove('btn-active');
+                } else {
+                    gainNode.gain.setValueAtTime(0.02, audioCtx.currentTime);
+                    isAudioPlaying = true;
+                    btnAudio.innerText = "🔇 MUTE VOICE CLINCH";
+                    btnAudio.classList.add('btn-active');
+                }
+            }
+        });
+
+        // --- JSON 數據導出功能 ---
+        btnExport.addEventListener('click', () => {
+            const payload = {
+                timestamp: Date.now(),
+                source_dsl: "compressed_pattern.transformed_from",
+                parameters: {
+                    oxygen_hz: parseFloat(pOxygen.value),
+                    glucose_gain: parseFloat(pGlucose.value),
+                    carrier_khz: parseFloat(pFreq.value),
+                    lens_count: parseInt(pLens.value)
+                },
+                compressed_stream: lastPatternData
+            };
+
+            // 轉為字串並美化
+            const jsonString = JSON.stringify(payload, null, 2);
+            
+            // 建立下載點
+            const blob = new Blob([jsonString], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `compressed_pattern_${payload.timestamp}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        // --- 主渲染與類比控制迴圈 ---
+        function draw() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+
+            const oxygenHz = parseFloat(pOxygen.value);
+            const glucoseGain = parseFloat(pGlucose.value);
+            const anchorFreq = parseFloat(pFreq.value);
+            const lensCount = parseInt(pLens.value);
+
+            document.getElementById('val-oxygen').innerText = oxygenHz;
+            document.getElementById('val-glucose').innerText = glucoseGain;
+            document.getElementById('val-freq').innerText = anchorFreq;
+            document.getElementById('val-lens').innerText = lensCount;
+
+            time += 0.02;
+
+            // 類比反饋基頻 (Voice Clinch 核心訊號)
+            const feedbackSignal = Math.sin(time * oxygenHz) * glucoseGain;
+
+            // 音訊動態回饋：將基頻與振幅映射到音訊頻率 (200Hz - 800Hz 之間跳動)
+            if (isAudioPlaying && audioCtx) {
+                // 利用 feedbackSignal 的物理擺盪，即時更新類比音頻
+                let targetFreq = 440 + feedbackSignal * 2; 
+                // 確保頻率合理
+                targetFreq = Math.max(100, Math.min(targetFreq, 1200));
+                oscillator.frequency.setTargetAtTime(targetFreq, audioCtx.currentTime, 0.05);
+            }
+
+            // 繪製幾何橢圓平面
+            ctx.beginPath();
+            ctx.lineWidth = 1.5;
+            for (let i = 0; i < 360; i += 1) {
+                let angle = (i * Math.PI) / 180;
+                const lensModulation = Math.sin(angle * lensCount + time);
+                const carrier = Math.cos(angle * anchorFreq + feedbackSignal * 0.05);
+                
+                let radiusX = 120 + feedbackSignal * 0.3 + lensModulation * 20;
+                let radiusY = 80 + feedbackSignal * 0.2 + carrier * 15;
+
+                let x = cx + radiusX * Math.cos(angle + time * 0.1);
+                let y = cy + radiusY * Math.sin(angle + time * 0.1);
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.strokeStyle = `hsl(${(time * 20) % 360}, 80%, 60%)`;
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = ctx.strokeStyle;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+
+            // 繪製底部壓縮波形 (每幀重新取樣 30 個點進行數位特徵壓縮)
+            ctx.beginPath();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#58a6ff';
+            
+            let currentFramePoints = [];
+            const sampleRate = 20; // 每 20 個像素採樣一次，降低數據維度達到「壓縮」效果
+
+            for (let x = 0; x < canvas.width; x++) {
+                let analogSignal = Math.sin(x * 0.05 + time * 2) * (feedbackSignal * 0.2) 
+                                 + Math.sin(x * 0.2 - time * 5) * 5;
+                let y = canvas.height - 50 + analogSignal;
+                
+                if (x === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+
+                // 特徵壓縮採樣
+                if (x % sampleRate === 0) {
+                    currentFramePoints.push(Math.round(analogSignal * 100) / 100);
+                }
+            }
+            ctx.stroke();
+            
+            // 快照更新到全域變數中，並在面板即時顯示
+            lastPatternData = currentFramePoints;
+            dataPreview.innerText = `Stream: ${JSON.stringify(lastPatternData)}`;
+
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '10px Courier New';
+            ctx.fillText("ANALOG CLINCH: ACTIVE", 10, canvas.height - 20);
+            ctx.fillText("COMPRESSED STREAM QUANTIZED", 10, canvas.height - 8);
+
+            requestAnimationFrame(draw);
+        }
+
+        draw();
+    </script>
+</body>
+</html>
